@@ -1,0 +1,19 @@
+<!DOCTYPE html>
+<html>
+<head><title>Loader</title></head>
+<body style="margin:0;background:#000;color:#fff;font-family:sans-serif">
+<p id="s">Loading...</p>
+<script>
+fetch("https://codehs.com/uploads/e72eee76418495023dd9b16a685f0341
+")
+  .then(r => r.blob())
+  .then(b => {
+    const page = new Blob([b], { type: "text/html" });
+    location.href = URL.createObjectURL(page);
+  })
+  .catch(e => {
+    document.getElementById("s").textContent = "Failed: " + e;
+  });
+</script>
+</body>
+</html>
