@@ -213,12 +213,14 @@ html,body{margin:0;width:100%;height:100%;overflow:hidden;background:#000}
           last = new Error(`network error (${error.message})`);
           continue;
         }
-        if (response.status === 206) {
-          const bytes = new Uint8Array(await response.arrayBuffer());
-          if (bytes.length === want) {
-            this.stats.partFetches++;
-            return bytes;
-          }
+      if (response.status === 206) {
+  const bytes = new Uint8Array(await response.arrayBuffer());
+  // Accept the chunk if it matches exactly, or if it's smaller but still gave us some data
+  if (bytes.length === want || (bytes.length < want && bytes.length > 0)) {
+    this.stats.partFetches++;
+    return bytes;
+  }
+
           last = new Error(`short read ${bytes.length}/${want}`);
           continue;
         }
