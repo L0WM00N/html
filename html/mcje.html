@@ -86,11 +86,11 @@ async function gunzip(bytes) {
 }
 
 globalThis.horizonOffline = async () => {
-    status.textContent = "Loading the game…";
+    status.textContent = "Loading the game ";
     const glue = await import(GLUE);
     // Runs the game's main, which only registers the game to start.
     await glue.default({ module_or_path: await gunzip(held("horizon-wasm")) });
-    status.textContent = "Unpacking resources…";
+    status.textContent = "Unpacking resources ";
     const tar = await gunzip(held("horizon-boot"));
     // The files the game reads later: one block, cut by the manifest's lengths.
     const store = await gunzip(held("horizon-store"));
