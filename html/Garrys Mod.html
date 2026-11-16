@@ -59,10 +59,33 @@
 </div>
 </div>
 <!-- Additional body modules -->
+<div id="gm-log"></div>
+<style>
+#gm-log{position:fixed;left:8px;bottom:8px;z-index:99999;max-width:min(620px,96vw);max-height:45vh;overflow:hidden;padding:6px 10px;font:12px/1.4 ui-monospace,Consolas,monospace;background:rgba(0,0,0,.78);color:#ddd;border-radius:6px;pointer-events:none;white-space:pre-wrap;word-break:break-word}
+#gm-log:empty{display:none}
+.gm-bad{color:#ff7b7b}.gm-warn{color:#ffd166}.gm-ok{color:#7ee787}
+</style>
 <script>
+        // ===== Added: on-screen log (bottom-left) =====
+        const gmBox = document.getElementById("gm-log");
+        let gmHadError = false, gmRejections = 0;
+        function gmLog(text, kind) {
+            console[kind === "bad" ? "error" : "log"]("[GM] " + text);
+            if (kind === "bad") gmHadError = true;
+            if (!gmBox) return;
+            const line = document.createElement("div");
+            line.className = "gm-" + (kind || "info");
+            line.textContent = text;
+            gmBox.appendChild(line);
+            gmBox.scrollTop = gmBox.scrollHeight;
+        }
+        function gmAutoHide() {
+            if (!gmHadError && gmBox) setTimeout(() => { gmBox.style.display = "none"; }, 5000);
+        }
+        window.addEventListener("error", (e) => { if (e && e.message) gmLog("Page error: " + e.message, "warn"); });
         const hideFullScreenButton = "";
-        const buildUrl = "https://cdn.jsdelivr.net/gh/organization-schoogls/y@main/Build";
-        const loaderUrl = buildUrl + "/build.loader.js";
+        let buildUrl = "https://cdn.jsdelivr.net/gh/organization-schoogls/y@main/Build";
+        let loaderUrl = buildUrl + "/build.loader.js";
         const config = {
             dataUrl: buildUrl + "/build.data.unityweb",
             frameworkUrl: buildUrl + "/build.framework.js.unityweb",
@@ -153,28 +176,107 @@
         function ConsumePurchase() { console.warn("ConsumePurchase is not implemented"); }
         function ConsumePurchases() { console.warn("ConsumePurchases is not implemented"); } // Varsayılan tanım eklendi
 
-        // Hata yakalama ile Unity başlatma işlemi
-        try {
+        // ===== Added: on-screen diagnostics + download-source fallback =====
+        const GM_HOSTS = ["cdn", "fastly", "gcore", "testingcf"];   // jsDelivr mirrors, tried in order
+        const GM_PATH = "/gh/organization-schoogls/y@main/Build";
+        const GM_FILES = ["build.loader.js", "build.framework.js.unityweb", "build.data.unityweb", "build.wasm.unityweb"];
+
+        function gmEnvReport() {
+            try {
+                const c = document.createElement("canvas");
+                const gl = c.getContext("webgl2");
+                gmLog("WebGL2: " + (gl ? "yes" : "NO (Unity needs it)"), gl ? "" : "bad");
+                if (gl) { const x = gl.getExtension("WEBGL_lose_context"); if (x) x.loseContext(); }
+            } catch (e) { gmLog("WebGL2 check failed: " + e.message, "bad"); }
+            gmLog("Memory: " + (navigator.deviceMemory ? navigator.deviceMemory + " GB (rounded)" : "unknown") + ", CPU cores: " + (navigator.hardwareConcurrency || "?"));
+            try {
+                const r = indexedDB.open("gm-diag");
+                r.onsuccess = () => { gmLog("Browser storage (IndexedDB): ok"); r.result.close(); indexedDB.deleteDatabase("gm-diag"); };
+                r.onerror = () => gmLog("Browser storage (IndexedDB): blocked", "warn");
+            } catch (e) { gmLog("Browser storage (IndexedDB): blocked (" + e.message + ")", "warn"); }
+        }
+
+        // Asks a mirror for the first byte of each build file, so a blocked or refused host is found quickly.
+        async function gmProbe(host) {
+            const base = "https://" + host + ".jsdelivr.net" + GM_PATH + "/";
+            for (const file of GM_FILES) {
+                const t0 = performance.now();
+                const ctl = new AbortController();
+                const timer = setTimeout(() => ctl.abort(), 15000);
+                try {
+                    const res = await fetch(base + file, { headers: { Range: "bytes=0-0" }, cache: "no-store", credentials: "omit", signal: ctl.signal });
+                    if (res.body) res.body.cancel().catch(() => {});
+                    if (res.status !== 200 && res.status !== 206) {
+                        gmLog(host + ": " + file + " -> HTTP " + res.status, "bad");
+                        return false;
+                    }
+                    gmLog(host + ": " + file + " ok (" + Math.round(performance.now() - t0) + " ms)");
+                } catch (e) {
+                    gmLog(host + ": " + file + " -> " + (e.name === "AbortError" ? "timed out" : "blocked or failed (" + e.message + ")"), "bad");
+                    return false;
+                } finally {
+                    clearTimeout(timer);
+                }
+            }
+            return true;
+        }
+
+        function gmStartUnity() {
+            let last = -1, milestone = -1, lastChange = performance.now();
+            const dog = setInterval(() => {
+                if (performance.now() - lastChange > 20000) {
+                    gmLog("No progress for 20 s (stuck at " + Math.round(Math.max(last, 0) * 100) + "%)", "warn");
+                    lastChange = performance.now();
+                }
+            }, 5000);
+            gmLog("Starting Unity…");
+            createUnityInstance(canvas, config, (progress) => {
+                spinner.style.display = "none";
+                progressBarEmpty.style.display = "";
+                progressBarFull.style.width = `${100 * progress}%`;
+                if (progress !== last) { last = progress; lastChange = performance.now(); }
+                const m = Math.floor(progress * 4);
+                if (m !== milestone) { milestone = m; gmLog("Loading " + Math.round(progress * 100) + "%"); }
+            }).then((unityInstance) => {
+                clearInterval(dog);
+                myGameInstance = unityInstance;
+                loadingCover.style.display = "none";
+                gmLog("Game started.", "ok");
+                gmAutoHide();
+            }).catch((message) => {
+                clearInterval(dog);
+                console.error("Unity yükleme hatası:", message);
+                gmLog("Unity failed to start: " + String((message && message.message) || message), "bad");
+            });
+        }
+
+        async function gmBoot() {
+            gmEnvReport();
+            let chosen = null;
+            for (const host of GM_HOSTS) {
+                gmLog("Checking " + host + ".jsdelivr.net…");
+                if (await gmProbe(host)) { chosen = host; break; }
+            }
+            if (chosen) {
+                gmLog("Using " + chosen + ".jsdelivr.net");
+            } else {
+                gmLog("No source passed the check; trying cdn anyway.", "bad");
+                chosen = "cdn";
+            }
+            buildUrl = "https://" + chosen + ".jsdelivr.net" + GM_PATH;
+            loaderUrl = buildUrl + "/build.loader.js";
+            config.dataUrl = buildUrl + "/build.data.unityweb";
+            config.frameworkUrl = buildUrl + "/build.framework.js.unityweb";
+            config.codeUrl = buildUrl + "/build.wasm.unityweb";
+            config.showBanner = (msg, type) => gmLog("Unity " + type + ": " + msg, type === "error" ? "bad" : "warn");
             const script = document.createElement("script");
             script.src = loaderUrl;
+            script.onerror = () => gmLog("Could not load build.loader.js from " + chosen + ".jsdelivr.net", "bad");
             script.onload = () => {
-                StartUnityInstance = function () {
-                    createUnityInstance(canvas, config, (progress) => {
-                        spinner.style.display = "none";
-                        progressBarEmpty.style.display = "";
-                        progressBarFull.style.width = `${100 * progress}%`;
-                    }).then((unityInstance) => {
-                        myGameInstance = unityInstance;
-                        loadingCover.style.display = "none";
-                    }).catch((message) => {
-                        console.error("Unity yükleme hatası:", message);
-                    });
-                };
+                StartUnityInstance = gmStartUnity;
                 StartUnityInstance();
             };
             document.body.appendChild(script);
-        } catch (error) {
-            console.error("Başlatma sırasında hata:", error);
         }
 
         function InitGame() {
@@ -192,25 +294,10 @@
         // Hata oluştuğunda oyuna devam etmek için tüm hataları global olarak yakalayan yapı
         window.addEventListener("unhandledrejection", function(event) {
             console.warn("Hata es geçildi:", event.reason);
+            if (gmRejections++ < 3) gmLog("Ignored error: " + String((event.reason && event.reason.message) || event.reason), "warn");
             event.preventDefault();
         });
+        gmBoot().catch((e) => gmLog("Startup error: " + e.message, "bad"));
     </script>
 </body>
 </html>
-
-
-]]>
-	</Content>
-</Module>
-        // Hata oluştuğunda oyuna devam etmek için tüm hataları global olarak yakalayan yapı
-        window.addEventListener("unhandledrejection", function(event) {
-            console.warn("Hata es geçildi:", event.reason);
-            event.preventDefault();
-        });
-    </script>
-</body>
-</html>
-
-
-</Content>
-</Module>
